@@ -1,0 +1,6 @@
+# 文本文件统一 LF 换行，避免跨平台 diff 噪音
+*.v   text eol=lf
+*.adc text eol=lf
+*.fdc text eol=lf
+*.md  text eol=lf
+*.txt text eol=lf

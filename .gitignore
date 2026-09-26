@@ -1,0 +1,10 @@
+# ZCode 内部目录
+.zcode/
+.zcodeignore
+
+# PDS 工程文件（含生成产物，可由 rtl/ + pds/ 重建，不入库）
+prj/
+
+# 仿真/综合临时目录
+work/
+*.log

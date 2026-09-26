@@ -1,0 +1,85 @@
+#------------------------------------------------------------------------------
+# 文件名 : pgl22g.adc
+# 功能   : PDS（Pango Design Suite）物理约束：引脚位置/电平标准
+# 板卡   : ALINX PGL22G 开发板，FPGA 型号 PGL22G-6CMBG324（240 个可用 IO）
+# 依据   : 《PGL22G开发板用户手册 Rev1.1》
+#------------------------------------------------------------------------------
+# 使用方法：PDS 工程中添加本文件为约束文件（综合后布局布线时生效）
+# 修改接线：MPU6050 换引脚时只需改 i2c_scl/i2c_sda 两行 PAP_IO_LOC 的值
+#------------------------------------------------------------------------------
+
+#==================== 时钟与复位 ====================
+# 板载 50MHz 晶振（手册 2-3 节：CLK_50MHZ → B5）
+# 注意：晶振输出为 3.3V（手册 2-11-2 电源表：Bank L0 为 3.3V），
+#       电平标准必须用 LVCMOS33；若工程里 Bank L0 电压被设为 1.2V 请改回 3.3V
+define_attribute {p:clk} {PAP_IO_LOC} {B5}
+define_attribute {p:clk} {PAP_IO_VCCIO} {3.3}
+define_attribute {p:clk} {PAP_IO_STANDARD} {LVCMOS33}
+define_attribute {p:clk} {PAP_IO_DIRECTION} {INPUT}
+define_attribute {p:clk} {PAP_IO_NONE} {TRUE}
+
+# 复位按键（手册 2-7 节：RESET_N → RST_N → F10，专用复位引脚）
+# 注：若 PDS 不允许把 F10 用作普通输入，可改用用户按键 KEY4 = U12（按下低有效复位），
+#     只需把下面两处的 F10 改为 U12
+define_attribute {p:rst_n} {PAP_IO_LOC} {F10}
+define_attribute {p:rst_n} {PAP_IO_VCCIO} {3.3}
+define_attribute {p:rst_n} {PAP_IO_STANDARD} {LVCMOS33}
+define_attribute {p:rst_n} {PAP_IO_DIRECTION} {INPUT}
+define_attribute {p:rst_n} {PAP_IO_NONE} {TRUE}
+
+#==================== I2C（接 MPU6050） ====================
+# 推荐接到 J8 排针：i2c_sda=第35脚(R18)、i2c_scl=第36脚(N14)，
+# 紧邻 37/38 脚 GND 与 39/40 脚 +3.3V，接线最方便（手册 3-9-2 节）
+# 注意：I2C 为开漏总线，必须外接上拉电阻；GY-521 模块自带 4.7k 上拉，
+# 自制模块时需在 SDA/SCL 各接 4.7k 到 3.3V
+define_attribute {p:i2c_scl} {PAP_IO_LOC} {N14}
+define_attribute {p:i2c_scl} {PAP_IO_VCCIO} {3.3}
+define_attribute {p:i2c_scl} {PAP_IO_STANDARD} {LVCMOS33}
+define_attribute {p:i2c_scl} {PAP_IO_DIRECTION} {INOUT}
+define_attribute {p:i2c_scl} {PAP_IO_NONE} {TRUE}
+
+define_attribute {p:i2c_sda} {PAP_IO_LOC} {R18}
+define_attribute {p:i2c_sda} {PAP_IO_VCCIO} {3.3}
+define_attribute {p:i2c_sda} {PAP_IO_STANDARD} {LVCMOS33}
+define_attribute {p:i2c_sda} {PAP_IO_DIRECTION} {INOUT}
+define_attribute {p:i2c_sda} {PAP_IO_NONE} {TRUE}
+
+#==================== UART（板载 CP2102 USB 转串口） ====================
+# 手册 3-6 节：UART_TXD → C10（FPGA 发送 → CP2102 RXD）
+define_attribute {p:uart_tx} {PAP_IO_LOC} {C10}
+define_attribute {p:uart_tx} {PAP_IO_VCCIO} {3.3}
+define_attribute {p:uart_tx} {PAP_IO_STANDARD} {LVCMOS33}
+define_attribute {p:uart_tx} {PAP_IO_DIRECTION} {OUTPUT}
+define_attribute {p:uart_tx} {PAP_IO_DRIVE} {4}
+define_attribute {p:uart_tx} {PAP_IO_NONE} {TRUE}
+
+#==================== 状态指示 LED ====================
+# 手册 3-13 节：LED1=U10、LED2=V10、LED3=U11、LED4=V11
+# 若 LED 与扩展接口（CON2）使用冲突，可删除对应行
+define_attribute {p:led[0]} {PAP_IO_LOC} {U10}
+define_attribute {p:led[0]} {PAP_IO_VCCIO} {3.3}
+define_attribute {p:led[0]} {PAP_IO_STANDARD} {LVCMOS33}
+define_attribute {p:led[0]} {PAP_IO_DIRECTION} {OUTPUT}
+define_attribute {p:led[0]} {PAP_IO_DRIVE} {4}
+define_attribute {p:led[0]} {PAP_IO_NONE} {TRUE}
+
+define_attribute {p:led[1]} {PAP_IO_LOC} {V10}
+define_attribute {p:led[1]} {PAP_IO_VCCIO} {3.3}
+define_attribute {p:led[1]} {PAP_IO_STANDARD} {LVCMOS33}
+define_attribute {p:led[1]} {PAP_IO_DIRECTION} {OUTPUT}
+define_attribute {p:led[1]} {PAP_IO_DRIVE} {4}
+define_attribute {p:led[1]} {PAP_IO_NONE} {TRUE}
+
+define_attribute {p:led[2]} {PAP_IO_LOC} {U11}
+define_attribute {p:led[2]} {PAP_IO_VCCIO} {3.3}
+define_attribute {p:led[2]} {PAP_IO_STANDARD} {LVCMOS33}
+define_attribute {p:led[2]} {PAP_IO_DIRECTION} {OUTPUT}
+define_attribute {p:led[2]} {PAP_IO_DRIVE} {4}
+define_attribute {p:led[2]} {PAP_IO_NONE} {TRUE}
+
+define_attribute {p:led[3]} {PAP_IO_LOC} {V11}
+define_attribute {p:led[3]} {PAP_IO_VCCIO} {3.3}
+define_attribute {p:led[3]} {PAP_IO_STANDARD} {LVCMOS33}
+define_attribute {p:led[3]} {PAP_IO_DIRECTION} {OUTPUT}
+define_attribute {p:led[3]} {PAP_IO_DRIVE} {4}
+define_attribute {p:led[3]} {PAP_IO_NONE} {TRUE}
