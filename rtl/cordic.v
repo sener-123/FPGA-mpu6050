@@ -68,8 +68,10 @@ module cordic #(
     reg signed [31:0] y_r [0:STAGES];   // y 分量
     reg signed [31:0] a_r [0:STAGES];   // 累计旋转角（弧度，Q16.16）
     reg [STAGES+1:0]  valid_pipe;       // 有效信号流水
-    reg               x_neg;            // 输入 x<0 标志（象限修正用）
-    reg               y_sign;           // 输入 y 符号（象限修正用）
+    // 输入符号（象限修正用）：必须与 x_r/y_r/a_r 同步打拍——早期版本只用单级
+    // 寄存器，与 a_r[STAGES] 错位 STAGES 拍，输入向量更新瞬间会输出 ±180° 跳变
+    reg               x_neg_pipe [0:STAGES];
+    reg               y_sign_pipe [0:STAGES];
 
     //---------------------- 输入级：x<0 时取反，保证 CORDIC 收敛域 ------
     always @(posedge clk or negedge rst_n) begin
@@ -77,13 +79,13 @@ module cordic #(
             x_r[0]        <= 32'd0;
             y_r[0]        <= 32'd0;
             a_r[0]        <= 32'd0;
-            x_neg         <= 1'b0;
-            y_sign        <= 1'b0;
+            x_neg_pipe[0] <= 1'b0;
+            y_sign_pipe[0] <= 1'b0;
             valid_pipe[0] <= 1'b0;
         end else begin
-            valid_pipe[0] <= valid_in;
-            x_neg         <= x_in[31];
-            y_sign        <= y_in[31];
+            valid_pipe[0]  <= valid_in;
+            x_neg_pipe[0]  <= x_in[31];
+            y_sign_pipe[0] <= y_in[31];
             if (x_in[31]) begin
                 x_r[0] <= -x_in;   // 取反后 x>0，|atan2| ≤ 90°，保证收敛
                 y_r[0] <= -y_in;
@@ -104,8 +106,12 @@ module cordic #(
                     x_r[i+1] <= 32'd0;
                     y_r[i+1] <= 32'd0;
                     a_r[i+1] <= 32'd0;
+                    x_neg_pipe[i+1]  <= 1'b0;
+                    y_sign_pipe[i+1] <= 1'b0;
                 end else begin
-                    valid_pipe[i+1] <= valid_pipe[i];
+                    valid_pipe[i+1]  <= valid_pipe[i];
+                    x_neg_pipe[i+1]  <= x_neg_pipe[i];
+                    y_sign_pipe[i+1] <= y_sign_pipe[i];
                     if (y_r[i][31]) begin
                         // y<0：顺时针旋转，把 y 向 0 逼近
                         x_r[i+1] <= x_r[i] - (y_r[i] >>> i);
@@ -129,9 +135,11 @@ module cordic #(
 
     // 象限修正：x<0 时取反后算出的是镜像角 θ'，
     // 原 y<0 → 真实角 = θ'-180°；原 y>0 → 真实角 = θ'+180°（180° = 0xB40000）
-    wire signed [31:0] deg_fix = x_neg ? (y_sign ? deg_raw - 32'sd11796480
-                                                : deg_raw + 32'sd11796480)
-                                       : deg_raw;
+    // 注意符号标志与 a_r[STAGES] 同一流水级，确保修正与角度数据对齐
+    wire signed [31:0] deg_fix = x_neg_pipe[STAGES]
+                                 ? (y_sign_pipe[STAGES] ? deg_raw - 32'sd11796480
+                                                        : deg_raw + 32'sd11796480)
+                                 : deg_raw;
 
     // 模长增益补偿：16级迭代增益 1/K = 1.646760258（64位中间量）
     wire signed [63:0] mag_prod = x_r[STAGES] * 32'sd107923;

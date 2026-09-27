@@ -1,40 +1,47 @@
 //------------------------------------------------------------------------------
 // 文件名 : attitude_calc.v
 // 功能   : MPU6050 姿态解算（原始数据 → 加速度/角速度/欧拉角）
-// 日期   : 2026-09-24
+//          含上电零偏校准，姿态由四元数引擎（quaternion_ahrs）解算
+// 日期   : 2026-09-24（2026-09-26 增加零偏校准；改用四元数姿态解算）
 //------------------------------------------------------------------------------
-/* @brief  MPU6050 姿态解算（全部 Q16.16 定点运算，1符号+15整数+16小数）
+/* @brief  MPU6050 姿态解算（全部定点运算）
  *         输入原始传感器数据（500Hz 帧同步），输出：
  *         1) 三轴加速度，Q16.16，单位 g（1g = 0x10000）
  *         2) 三轴角速度，Q16.16，单位 °/s（1°/s = 0x10000）
  *         3) 欧拉角 roll/pitch/yaw，Q16.16，单位 °
- *         算法：
- *         - 加速度计静态角（CORDIC 向量模式实现）：
- *           roll  = atan2(ay, az)
- *           pitch = atan2(-ax, √(ay²+az²))
- *         - 互补滤波：angle = 0.98×(angle + gyro×dt) + 0.02×accel_angle
- *           抑制陀螺仪温漂，同时滤除加速度计的振动/运动干扰
- *         - yaw = 纯陀螺仪 z 轴积分（无磁力计，见 @note）
- * @param  LATENCY : 流水线总延迟，固定为35个时钟（仅文档用，不影响逻辑）
+ *         算法流程：
+ *         - 上电零偏校准：复位后前 512 帧（约1秒，需保持板子水平静止）累加
+ *           各轴原始值取平均，之后每帧减去零偏（az 以 1g=16384 归一）
+ *         - 加速度 8 帧滑动平均低通（16ms 窗口）：抑制传感器噪声被四元数
+ *           修正项放大注入三个轴（含 yaw），避免静止时角度抖动
+ *         - 四元数姿态引擎（Mahony 式互补滤波）：
+ *           修正项 e = a×v（加速度计测量与四元数估计重力方向叉积）在任意姿态
+ *           下均有效，四元数可连续跟踪 360° 姿态，无欧拉角奇点/折叠
+ *         - 欧拉角（由旋转矩阵元素经 CORDIC atan2 换算）：
+ *           roll  = atan2(R32, R33)   范围 (-180°,180°]
+ *           pitch = atan2(-R31, R33)  范围 (-180°,180°]，全范围倾斜角，
+ *                                     超过 ±90° 不再折叠（与四元数状态一致）
+ *           yaw   = atan2(R21, R11)   范围 (-180°,180°]
+ * @param  LATENCY : 总流水延迟约150个时钟（四元数状态机约132 + CORDIC 17 + 寄存1）
  * @param  accel_x/y/z_raw[15:0] : 原始加速度（来自 mpu6050_driver）
  * @param  gyro_x/y/z_raw[15:0]  : 原始角速度（来自 mpu6050_driver）
  * @param  data_valid_in : 帧同步脉冲（500Hz）
- * @return accel_x/y/z_g[31:0]  : 加速度 Q16.16，单位 g（g = raw/16384 → raw<<2）
- * @return gyro_x/y/z_dps[31:0] : 角速度 Q16.16，单位 °/s（°/s = raw/131 → raw×500）
- * @return roll/pitch/yaw[31:0] : 姿态角 Q16.16，单位 °，roll/yaw ∈ (-180,180]
- * @return data_valid_out : 输出帧同步（滞后输入35个时钟）
- * @note   1) 每帧角度增量推导：°/s = raw/131，dt = 2ms，
- *            增量(Q16.16) = raw/131 × 0.002 × 65536 = raw × 1.00055 ≈ raw，
- *            故直接用 raw 累加（误差 0.055%）；角速度输出 ×500 同源误差
- *         2) yaw 无绝对参考（MPU6050 无磁力计），仅积分角速度，
- *            会随时间漂移，上电时从 0 开始
- *         3) pitch 定义在 (-90°, 90°)（atan2 公式固有范围），
- *            板子翻转超过 ±90° 时请改用四元数方案
- *         4) 互补滤波 K=0.98 适用于一般应用；上电后角度约 0.2s 收敛
- *         5) 滤波初值 0 与真实姿态的收敛时间常数 ≈ 1/(1-K) 帧 ≈ 100ms
+ * @return accel_x/y/z_g[31:0]  : 校准后加速度 Q16.16，单位 g
+ * @return gyro_x/y/z_dps[31:0] : 校准后角速度 Q16.16，单位 °/s（raw/131 → raw×500）
+ * @return roll/pitch/yaw[31:0] : 姿态角 Q16.16，单位 °
+ * @return data_valid_out : 输出帧同步（校准完成后才有效）
+ * @return calib_done : 零偏校准完成标志（高有效）
+ * @note   1) 校准期间（复位后约1秒）必须保持板子**水平静止**，否则零偏不准；
+ *            校准期间输出保持 0，校准完成后约 1 秒滤波收敛
+ *         2) pitch 采用全范围定义（绕 Y 轴倾斜角），在极端组合姿态（roll 接近
+ *            ±90°）时与标准欧拉角定义存在差异，属欧拉角表示固有特性
+ *         3) yaw 无绝对参考（MPU6050 无磁力计），仅由陀螺积分维持，
+ *            零偏校准后漂移显著减小，上电时从 0 开始
+ *         4) 角速度显示 ×500（65536/131=500.275 取整，误差 0.055%），
+ *            与四元数引擎内部的精确定标（×572@Q31.32，误差 0.04%）相互独立
  */
 module attitude_calc #(
-    parameter LATENCY = 35
+    parameter LATENCY = 96
 )(
     input  wire        clk,
     input  wire        rst_n,
@@ -54,7 +61,8 @@ module attitude_calc #(
     output wire signed [31:0] roll,
     output wire signed [31:0] pitch,
     output wire signed [31:0] yaw,
-    output wire        data_valid_out
+    output wire        data_valid_out,
+    output reg         calib_done
 );
 
     //====================== 采样寄存器（帧同步锁存） ======================
@@ -75,90 +83,148 @@ module attitude_calc #(
         end
     end
 
-    //====================== 原始值 → 物理量（Q16.16） ======================
-    // 加速度：g = raw/16384（±2g 量程），Q16.16 定点 = raw×4（精确移位）
-    wire signed [31:0] ax_q16 = $signed({ax_r, 2'b00});
-    wire signed [31:0] ay_q16 = $signed({ay_r, 2'b00});
-    wire signed [31:0] az_q16 = $signed({az_r, 2'b00});
-    // 角速度：°/s = raw/131（±250°/s 量程），Q16.16 定点 = raw×65536/131
-    //        ≈ raw×500（65536/131 = 500.275，取500，误差 0.055%）
-    wire signed [31:0] gx_q16 = gx_r * 32'sd500;
-    wire signed [31:0] gy_q16 = gy_r * 32'sd500;
-    wire signed [31:0] gz_q16 = gz_r * 32'sd500;
+    //====================== 上电零偏校准 ======================
+    // 复位后前 CALIB_FRAMES 帧（约1秒，板子须保持水平静止）累加各轴原始值，
+    // 之后每帧减去零偏。az 零偏以 1g=16384 为基准归一
+    localparam CALIB_FRAMES = 10'd512;    // 512帧 ≈ 1.024s @500Hz
 
-    //====================== CORDIC 实例1 ======================
-    // roll = atan2(ay, az)，同时得到 √(ay²+az²) 供 pitch 使用
-    wire signed [31:0] roll_deg, ayaz_mag;
-    wire cordic1_valid;
-    cordic #(.STAGES(16)) u_cordic_roll (
-        .clk       (clk),
-        .rst_n     (rst_n),
-        .x_in      (az_q16),
-        .y_in      (ay_q16),
-        .valid_in  (data_valid_in),
-        .angle     (roll_deg),
-        .mag       (ayaz_mag),
-        .valid_out (cordic1_valid)
-    );
-
-    //====================== CORDIC 实例2 ======================
-    // pitch = atan2(-ax, √(ay²+az²))，x=模长≥0，无需象限修正
-    wire signed [31:0] pitch_deg;
-    wire cordic2_valid;
-    cordic #(.STAGES(16)) u_cordic_pitch (
-        .clk       (clk),
-        .rst_n     (rst_n),
-        .x_in      (ayaz_mag),
-        .y_in      (-ax_q16),
-        .valid_in  (cordic1_valid),
-        .angle     (pitch_deg),
-        .mag       (),               // 模长未使用
-        .valid_out (cordic2_valid)
-    );
-
-    //====================== 互补滤波 + 积分 ======================
-    // 滤波公式：angle = 0.98×(angle + gyro×dt) + 0.02×accel_angle
-    // 每帧陀螺增量 ≈ raw（推导见模块头 @note 1）
-    localparam signed [31:0] K_C   = 32'sd64225;   // K   = 0.98 的 Q16.16
-    localparam signed [31:0] K_1MC = 32'sd1311;    // 1-K = 0.02 的 Q16.16
-
-    // 原始值符号扩展到32位（每帧角度增量直接累加）
-    wire signed [31:0] gx_ext = $signed({{16{gx_r[15]}}, gx_r});
-    wire signed [31:0] gy_ext = $signed({{16{gy_r[15]}}, gy_r});
-    wire signed [31:0] gz_ext = $signed({{16{gz_r[15]}}, gz_r});
-
-    // 滤波状态寄存器（须在使用它的连续赋值之前声明）
-    reg signed [31:0] roll_f, pitch_f, yaw_f;
-
-    // 陀螺预测角（上一帧角度 + 本帧角速度积分）
-    wire signed [31:0] roll_pred  = roll_f  + gx_ext;
-    wire signed [31:0] pitch_pred = pitch_f + gy_ext;
-
-    // 64位中间量避免溢出（最大 ±180°×64225 ≈ ±7.6e11 < 2^63）
-    wire signed [63:0] roll_prod_k   = roll_pred  * K_C;
-    wire signed [63:0] pitch_prod_k  = pitch_pred * K_C;
-    wire signed [63:0] roll_prod_1k  = roll_deg  * K_1MC;
-    wire signed [63:0] pitch_prod_1k = pitch_deg * K_1MC;
-
-    // 互补滤波输出（Q16.16 度）
-    wire signed [31:0] roll_next  = (roll_prod_k  >>> 16) + (roll_prod_1k  >>> 16);
-    wire signed [31:0] pitch_next = (pitch_prod_k >>> 16) + (pitch_prod_1k >>> 16);
-    // yaw：纯陀螺积分（无加速度计参考，见 @note 2）
-    wire signed [31:0] yaw_next   = yaw_f + gz_ext;
+    reg signed [24:0] gx_acc, gy_acc, gz_acc;
+    reg signed [24:0] ax_acc, ay_acc, az_acc;
+    reg  [9:0]  calib_cnt;
+    reg  [15:0] gx_off, gy_off, gz_off;   // 陀螺仪零偏（raw 单位）
+    reg  [15:0] ax_off, ay_off, az_off;   // 加速度计零偏（raw 单位）
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            roll_f  <= 32'sd0;
-            pitch_f <= 32'sd0;
-            yaw_f   <= 32'sd0;
-        end else if (cordic2_valid) begin
-            roll_f  <= roll_next;
-            pitch_f <= pitch_next;
-            yaw_f   <= yaw_next;
+            calib_cnt  <= 10'd0;
+            calib_done <= 1'b0;
+            gx_acc <= 25'sd0; gy_acc <= 25'sd0; gz_acc <= 25'sd0;
+            ax_acc <= 25'sd0; ay_acc <= 25'sd0; az_acc <= 25'sd0;
+            gx_off <= 16'sd0; gy_off <= 16'sd0; gz_off <= 16'sd0;
+            ax_off <= 16'sd0; ay_off <= 16'sd0; az_off <= 16'sd0;
+        end else if (data_valid_in && !calib_done) begin
+            gx_acc <= gx_acc + gx_r;
+            gy_acc <= gy_acc + gy_r;
+            gz_acc <= gz_acc + gz_r;
+            ax_acc <= ax_acc + ax_r;
+            ay_acc <= ay_acc + ay_r;
+            az_acc <= az_acc + az_r;
+            if (calib_cnt == CALIB_FRAMES - 1) begin
+                calib_done <= 1'b1;
+                gx_off <= gx_acc[24:9];            // 累加和 >> 9 = 平均值
+                gy_off <= gy_acc[24:9];
+                gz_off <= gz_acc[24:9];
+                ax_off <= ax_acc[24:9];
+                ay_off <= ay_acc[24:9];
+                az_off <= az_acc[24:9] - 16'sd16384;   // az 以 1g 为基准
+            end else begin
+                calib_cnt <= calib_cnt + 1'b1;
+            end
         end
     end
 
+    //====================== 零偏校准后的值 ======================
+    // 角速度：减去零偏后符号扩展为32位
+    wire signed [31:0] gx_cal = $signed({{16{gx_r[15]}}, gx_r}) - $signed({{16{gx_off[15]}}, gx_off});
+    wire signed [31:0] gy_cal = $signed({{16{gy_r[15]}}, gy_r}) - $signed({{16{gy_off[15]}}, gy_off});
+    wire signed [31:0] gz_cal = $signed({{16{gz_r[15]}}, gz_r}) - $signed({{16{gz_off[15]}}, gz_off});
+
+    // 加速度：减去零偏（两操作数显式符号扩展后再相减——ax_r/ax_off 是补码值，
+    // 直接写 ax_r-ax_off 会按无符号运算，负差值被当成 +65k 大数，姿态与显示全错）
+    wire signed [17:0] ax_d = $signed({ax_r[15], ax_r}) - $signed({ax_off[15], ax_off});
+    wire signed [17:0] ay_d = $signed({ay_r[15], ay_r}) - $signed({ay_off[15], ay_off});
+    wire signed [17:0] az_d = $signed({az_r[15], az_r}) - $signed({az_off[15], az_off});
+
+    //====================== 加速度 8 帧滑动平均（低通，16ms 窗口） ======================
+    // MPU6050 ±2g 加速度计噪声（DLPF=1，184Hz 带宽）RMS 约 5mg：若直接注入四元数
+    // 修正项，会被 Kp 放大成约 1°/s 级的角速度抖动，三个轴（含 yaw）静止时乱飘。
+    // 8 帧平均把噪声带宽压到约 31Hz（噪声降约 2.8 倍），相位延迟仅 16ms，
+    // 对姿态响应无影响。平均输出 = sum/8（raw 单位），再 ×4 即 Q16.16
+    reg signed [17:0] ax_h [0:7], ay_h [0:7], az_h [0:7];   // 8 级移位链
+    reg signed [21:0] ax_sum, ay_sum, az_sum;               // 滑动窗口和（8×±65535）
+    integer k;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            for (k = 0; k < 8; k = k + 1) begin
+                ax_h[k] <= 18'sd0; ay_h[k] <= 18'sd0; az_h[k] <= 18'sd0;
+            end
+            ax_sum <= 22'sd0; ay_sum <= 22'sd0; az_sum <= 22'sd0;
+        end else if (data_valid_in) begin
+            ax_h[0] <= ax_d; ay_h[0] <= ay_d; az_h[0] <= az_d;
+            for (k = 1; k < 8; k = k + 1) begin
+                ax_h[k] <= ax_h[k-1]; ay_h[k] <= ay_h[k-1]; az_h[k] <= az_h[k-1];
+            end
+            ax_sum <= ax_sum + ax_d - ax_h[7];
+            ay_sum <= ay_sum + ay_d - ay_h[7];
+            az_sum <= az_sum + az_d - az_h[7];
+        end
+    end
+
+    // 平均后换算 Q16.16：avg_raw×4 = sum/8×4 = sum/2 = sum<<<1
+    wire signed [31:0] ax_q16 = $signed(ax_sum) <<< 1;
+    wire signed [31:0] ay_q16 = $signed(ay_sum) <<< 1;
+    wire signed [31:0] az_q16 = $signed(az_sum) <<< 1;
+
+    // 角速度显示：°/s = raw/131，Q16.16 定点 = raw×65536/131 ≈ raw×500（误差 0.055%）
+    wire signed [31:0] gx_q16 = gx_cal * 32'sd500;
+    wire signed [31:0] gy_q16 = gy_cal * 32'sd500;
+    wire signed [31:0] gz_q16 = gz_cal * 32'sd500;
+
+    //====================== 四元数姿态引擎 ======================
+    wire signed [31:0] r31, r32, r33, r21, r11;
+    wire q_valid;
+
+    quaternion_ahrs u_quaternion_ahrs (
+        .clk         (clk),
+        .rst_n       (rst_n),
+        .accel_x     (ax_q16),
+        .accel_y     (ay_q16),
+        .accel_z     (az_q16),
+        .gyro_x      (gx_cal),
+        .gyro_y      (gy_cal),
+        .gyro_z      (gz_cal),
+        .frame_valid (data_valid_in && calib_done),
+        .q0_out      (),
+        .q1_out      (),
+        .q2_out      (),
+        .q3_out      (),
+        .r31         (r31),
+        .r32         (r32),
+        .r33         (r33),
+        .r21         (r21),
+        .r11         (r11),
+        .q_valid     (q_valid)
+    );
+
+    //====================== 欧拉角换算（CORDIC atan2，三路并行） ======================
+    // 旋转矩阵元素为 Q16.15（1.0=32768），两输入同比例，atan2 结果不受定标影响
+    wire signed [31:0] roll_deg, pitch_deg, yaw_deg;
+    wire roll_valid, pitch_valid, yaw_valid;
+
+    cordic #(.STAGES(16)) u_cordic_roll (
+        .clk(clk), .rst_n(rst_n),
+        .x_in(r33), .y_in(r32),
+        .valid_in(q_valid),
+        .angle(roll_deg), .mag(),
+        .valid_out(roll_valid)
+    );
+    cordic #(.STAGES(16)) u_cordic_pitch (
+        .clk(clk), .rst_n(rst_n),
+        .x_in(r33), .y_in(-r31),         // 全范围：atan2(-R31, R33) ∈ ±180°
+        .valid_in(q_valid),
+        .angle(pitch_deg), .mag(),
+        .valid_out(pitch_valid)
+    );
+    cordic #(.STAGES(16)) u_cordic_yaw (
+        .clk(clk), .rst_n(rst_n),
+        .x_in(r11), .y_in(r21),
+        .valid_in(q_valid),
+        .angle(yaw_deg), .mag(),
+        .valid_out(yaw_valid)
+    );
+
     //====================== 输出寄存（与 data_valid_out 对齐） ======================
+    // 校准期间输出保持 0，data_valid_out 亦不产生脉冲
     reg signed [31:0] accel_x_o, accel_y_o, accel_z_o;
     reg signed [31:0] gyro_x_o,  gyro_y_o,  gyro_z_o;
     reg signed [31:0] roll_o, pitch_o, yaw_o;
@@ -171,16 +237,16 @@ module attitude_calc #(
             roll_o    <= 32'sd0; pitch_o   <= 32'sd0; yaw_o     <= 32'sd0;
             valid_o   <= 1'b0;
         end else begin
-            accel_x_o <= ax_q16;
-            accel_y_o <= ay_q16;
-            accel_z_o <= az_q16;
-            gyro_x_o  <= gx_q16;
-            gyro_y_o  <= gy_q16;
-            gyro_z_o  <= gz_q16;
-            roll_o    <= roll_next;
-            pitch_o   <= pitch_next;
-            yaw_o     <= yaw_next;
-            valid_o   <= cordic2_valid;
+            accel_x_o <= calib_done ? ax_q16 : 32'sd0;
+            accel_y_o <= calib_done ? ay_q16 : 32'sd0;
+            accel_z_o <= calib_done ? az_q16 : 32'sd0;
+            gyro_x_o  <= calib_done ? gx_q16 : 32'sd0;
+            gyro_y_o  <= calib_done ? gy_q16 : 32'sd0;
+            gyro_z_o  <= calib_done ? gz_q16 : 32'sd0;
+            roll_o    <= roll_deg;
+            pitch_o   <= pitch_deg;
+            yaw_o     <= yaw_deg;
+            valid_o   <= roll_valid;
         end
     end
 

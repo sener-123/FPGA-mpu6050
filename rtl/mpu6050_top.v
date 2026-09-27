@@ -9,19 +9,19 @@
  *             ├── mpu6050_driver   （I2C 初始化 + 500Hz 采集，内含 i2c_master）
  *             ├── attitude_calc    （CORDIC + 互补滤波，内含 2 个 cordic）
  *             └── uart_tx          （115200 串口打印）
- *         串口输出：每 100ms 一帧 90 字节 ASCII 文本，格式示例：
- *           R: -12.3 P: -45.6 Y: 180.0 | AX: -0.01 AY:  0.02 AZ:  1.00 | GX:   0.1 GY:  -0.2 GZ:   0.3
+ *         串口输出：每 100ms 一帧 96 字节 ASCII 文本，格式示例：
+ *           R: -12.34 P: -45.67 Y: 180.00 | AX: -0.01 AY:  0.02 AZ:  1.00 | GX:   0.12 GY:  -0.23 GZ:   0.34
  * @param  CLK_FREQ : 主时钟频率(Hz)，默认 50_000_000（PGL22G 板载晶振）
  * @param  BAUD     : 串口波特率，默认 115200
  * @param  clk/rst_n : 时钟与异步复位（低有效）
  * @return i2c_scl  : I2C 时钟线（接 MPU6050 SCL，需 4.7kΩ 上拉，GY-521 模块自带）
  * @return i2c_sda  : I2C 数据线（接 MPU6050 SDA）
- * @return uart_tx  : 串口发送（板载 CP2102 USB 转串口）
- * @return led[3:0] : 状态指示灯：
+ * @return uart_tx  : 串口发送（板载 CP2102 或外接 USB-TTL）
+ * @return led[3:0] : 状态指示灯（低电平点亮）：
  *                    [0]=错误指示（error≠0 点亮）
  *                    [1]=数据心跳（约2Hz，数据正常流动时闪烁）
- *                    [2]=初始化完成（进入采样状态后常亮）
- *                    [3]=首帧数据成功（sticky，常亮表示系统正常）
+ *                    [2]=初始化完成（进入采样状态后点亮）
+ *                    [3]=零偏校准完成（点亮表示系统就绪；校准期间请保持板子水平静止约1秒）
  * @note   1) 默认端口仅 9 个（占用 9 个 IO），适配 PGL22G-6CMBG324（240 IO）
  *         2) 编译时定义宏 DEBUG_PORTS（PDS 工程设置里加宏，或 +define+DEBUG_PORTS）
  *            可额外引出 9 个宽调试端口（加速度/角速度/角度 Q16.16 各 32 位 +
@@ -66,6 +66,7 @@ module mpu6050_top #(
     wire [15:0] gyro_x_raw,  gyro_y_raw,  gyro_z_raw;
     wire [15:0] temp_raw;
     wire        frame_valid;
+    wire        calib_done;      // 零偏校准完成（复位后约1秒）
 
 `ifdef DEBUG_PORTS
     // 调试端口已声明为模块输出，直接由子模块驱动
@@ -118,7 +119,8 @@ module mpu6050_top #(
         .roll           (roll_deg),
         .pitch          (pitch_deg),
         .yaw            (yaw_deg),
-        .data_valid_out (data_valid)
+        .data_valid_out (data_valid),
+        .calib_done     (calib_done)
     );
 
     //====================== 状态指示 LED ======================
@@ -141,20 +143,12 @@ module mpu6050_top #(
     // led[2]：初始化完成（驱动状态机进入采样状态 S_RD_IDLE=14 之后点亮）
     assign led[2] = ~((state_dbg[4:0] >= 5'd14) && (state_dbg[4:0] != 5'd17));
 
-    // led[3]：首帧数据成功（sticky，点亮表示系统正常）
-    reg first_frame;
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            first_frame <= 1'b0;
-        end else if (data_valid) begin
-            first_frame <= 1'b1;
-        end
-    end
-    assign led[3] = ~first_frame;
+    // led[3]：零偏校准完成（点亮表示系统就绪，校准期间保持板子水平静止约1秒）
+    assign led[3] = ~calib_done;
 
     //====================== ASCII 格式化 + 串口发送 ======================
-    // 帧长度 90 字节，每 100ms 发送一帧
-    localparam F_MSG_LEN  = 90;
+    // 帧长度 96 字节，每 100ms 发送一帧
+    localparam F_MSG_LEN  = 96;
     localparam T100MS     = 25'd5_000_000;
 
     reg  [24:0] tick_cnt;     // 100ms 定时
@@ -202,9 +196,8 @@ module mpu6050_top #(
     endfunction
 
     //---------------------- 帧内容（按字符位置查表） ----------------------
-    // 角度 6列：符号+3位整数(空格对齐)+小数点+1位小数
+    // 角度/角速度 7列：符号+3位整数(空格对齐)+小数点+2位小数
     // 加速度 5列：符号+1位整数+小数点+2位小数
-    // 角速度 6列：同角度
     always @(*) begin
         case (char_idx)
             // ---- Roll ----
@@ -216,97 +209,103 @@ module mpu6050_top #(
             7'd5:  char_byte = q16_char(roll_lat, 3'd3);
             7'd6:  char_byte = q16_char(roll_lat, 3'd4);
             7'd7:  char_byte = q16_char(roll_lat, 3'd5);
-            7'd8:  char_byte = " ";
+            7'd8:  char_byte = q16_char(roll_lat, 3'd6);
+            7'd9:  char_byte = " ";
             // ---- Pitch ----
-            7'd9:  char_byte = "P";
-            7'd10: char_byte = ":";
-            7'd11: char_byte = q16_char(pitch_lat, 3'd0);
-            7'd12: char_byte = q16_char(pitch_lat, 3'd1);
-            7'd13: char_byte = q16_char(pitch_lat, 3'd2);
-            7'd14: char_byte = q16_char(pitch_lat, 3'd3);
-            7'd15: char_byte = q16_char(pitch_lat, 3'd4);
-            7'd16: char_byte = q16_char(pitch_lat, 3'd5);
-            7'd17: char_byte = " ";
+            7'd10: char_byte = "P";
+            7'd11: char_byte = ":";
+            7'd12: char_byte = q16_char(pitch_lat, 3'd0);
+            7'd13: char_byte = q16_char(pitch_lat, 3'd1);
+            7'd14: char_byte = q16_char(pitch_lat, 3'd2);
+            7'd15: char_byte = q16_char(pitch_lat, 3'd3);
+            7'd16: char_byte = q16_char(pitch_lat, 3'd4);
+            7'd17: char_byte = q16_char(pitch_lat, 3'd5);
+            7'd18: char_byte = q16_char(pitch_lat, 3'd6);
+            7'd19: char_byte = " ";
             // ---- Yaw ----
-            7'd18: char_byte = "Y";
-            7'd19: char_byte = ":";
-            7'd20: char_byte = q16_char(yaw_lat, 3'd0);
-            7'd21: char_byte = q16_char(yaw_lat, 3'd1);
-            7'd22: char_byte = q16_char(yaw_lat, 3'd2);
-            7'd23: char_byte = q16_char(yaw_lat, 3'd3);
-            7'd24: char_byte = q16_char(yaw_lat, 3'd4);
-            7'd25: char_byte = q16_char(yaw_lat, 3'd5);
-            7'd26: char_byte = " ";
-            7'd27: char_byte = "|";
-            7'd28: char_byte = " ";
+            7'd20: char_byte = "Y";
+            7'd21: char_byte = ":";
+            7'd22: char_byte = q16_char(yaw_lat, 3'd0);
+            7'd23: char_byte = q16_char(yaw_lat, 3'd1);
+            7'd24: char_byte = q16_char(yaw_lat, 3'd2);
+            7'd25: char_byte = q16_char(yaw_lat, 3'd3);
+            7'd26: char_byte = q16_char(yaw_lat, 3'd4);
+            7'd27: char_byte = q16_char(yaw_lat, 3'd5);
+            7'd28: char_byte = q16_char(yaw_lat, 3'd6);
+            7'd29: char_byte = " ";
+            7'd30: char_byte = "|";
+            7'd31: char_byte = " ";
             // ---- 加速度 X ----
-            7'd29: char_byte = "A";
-            7'd30: char_byte = "X";
-            7'd31: char_byte = ":";
-            7'd32: char_byte = q16_char(ax_lat, 3'd0);
-            7'd33: char_byte = q16_char(ax_lat, 3'd3);
-            7'd34: char_byte = q16_char(ax_lat, 3'd4);
-            7'd35: char_byte = q16_char(ax_lat, 3'd5);
-            7'd36: char_byte = q16_char(ax_lat, 3'd6);
-            7'd37: char_byte = " ";
+            7'd32: char_byte = "A";
+            7'd33: char_byte = "X";
+            7'd34: char_byte = ":";
+            7'd35: char_byte = q16_char(ax_lat, 3'd0);
+            7'd36: char_byte = q16_char(ax_lat, 3'd3);
+            7'd37: char_byte = q16_char(ax_lat, 3'd4);
+            7'd38: char_byte = q16_char(ax_lat, 3'd5);
+            7'd39: char_byte = q16_char(ax_lat, 3'd6);
+            7'd40: char_byte = " ";
             // ---- 加速度 Y ----
-            7'd38: char_byte = "A";
-            7'd39: char_byte = "Y";
-            7'd40: char_byte = ":";
-            7'd41: char_byte = q16_char(ay_lat, 3'd0);
-            7'd42: char_byte = q16_char(ay_lat, 3'd3);
-            7'd43: char_byte = q16_char(ay_lat, 3'd4);
-            7'd44: char_byte = q16_char(ay_lat, 3'd5);
-            7'd45: char_byte = q16_char(ay_lat, 3'd6);
-            7'd46: char_byte = " ";
+            7'd41: char_byte = "A";
+            7'd42: char_byte = "Y";
+            7'd43: char_byte = ":";
+            7'd44: char_byte = q16_char(ay_lat, 3'd0);
+            7'd45: char_byte = q16_char(ay_lat, 3'd3);
+            7'd46: char_byte = q16_char(ay_lat, 3'd4);
+            7'd47: char_byte = q16_char(ay_lat, 3'd5);
+            7'd48: char_byte = q16_char(ay_lat, 3'd6);
+            7'd49: char_byte = " ";
             // ---- 加速度 Z ----
-            7'd47: char_byte = "A";
-            7'd48: char_byte = "Z";
-            7'd49: char_byte = ":";
-            7'd50: char_byte = q16_char(az_lat, 3'd0);
-            7'd51: char_byte = q16_char(az_lat, 3'd3);
-            7'd52: char_byte = q16_char(az_lat, 3'd4);
-            7'd53: char_byte = q16_char(az_lat, 3'd5);
-            7'd54: char_byte = q16_char(az_lat, 3'd6);
-            7'd55: char_byte = " ";
-            7'd56: char_byte = "|";
-            7'd57: char_byte = " ";
+            7'd50: char_byte = "A";
+            7'd51: char_byte = "Z";
+            7'd52: char_byte = ":";
+            7'd53: char_byte = q16_char(az_lat, 3'd0);
+            7'd54: char_byte = q16_char(az_lat, 3'd3);
+            7'd55: char_byte = q16_char(az_lat, 3'd4);
+            7'd56: char_byte = q16_char(az_lat, 3'd5);
+            7'd57: char_byte = q16_char(az_lat, 3'd6);
+            7'd58: char_byte = " ";
+            7'd59: char_byte = "|";
+            7'd60: char_byte = " ";
             // ---- 角速度 X ----
-            7'd58: char_byte = "G";
-            7'd59: char_byte = "X";
-            7'd60: char_byte = ":";
-            7'd61: char_byte = q16_char(gx_lat, 3'd0);
-            7'd62: char_byte = q16_char(gx_lat, 3'd1);
-            7'd63: char_byte = q16_char(gx_lat, 3'd2);
-            7'd64: char_byte = q16_char(gx_lat, 3'd3);
-            7'd65: char_byte = q16_char(gx_lat, 3'd4);
-            7'd66: char_byte = q16_char(gx_lat, 3'd5);
-            7'd67: char_byte = " ";
+            7'd61: char_byte = "G";
+            7'd62: char_byte = "X";
+            7'd63: char_byte = ":";
+            7'd64: char_byte = q16_char(gx_lat, 3'd0);
+            7'd65: char_byte = q16_char(gx_lat, 3'd1);
+            7'd66: char_byte = q16_char(gx_lat, 3'd2);
+            7'd67: char_byte = q16_char(gx_lat, 3'd3);
+            7'd68: char_byte = q16_char(gx_lat, 3'd4);
+            7'd69: char_byte = q16_char(gx_lat, 3'd5);
+            7'd70: char_byte = q16_char(gx_lat, 3'd6);
+            7'd71: char_byte = " ";
             // ---- 角速度 Y ----
-            7'd68: char_byte = "G";
-            7'd69: char_byte = "Y";
-            7'd70: char_byte = ":";
-            7'd71: char_byte = q16_char(gy_lat, 3'd0);
-            7'd72: char_byte = q16_char(gy_lat, 3'd1);
-            7'd73: char_byte = q16_char(gy_lat, 3'd2);
-            7'd74: char_byte = q16_char(gy_lat, 3'd3);
-            7'd75: char_byte = q16_char(gy_lat, 3'd4);
-            7'd76: char_byte = q16_char(gy_lat, 3'd5);
-            7'd77: char_byte = " ";
+            7'd72: char_byte = "G";
+            7'd73: char_byte = "Y";
+            7'd74: char_byte = ":";
+            7'd75: char_byte = q16_char(gy_lat, 3'd0);
+            7'd76: char_byte = q16_char(gy_lat, 3'd1);
+            7'd77: char_byte = q16_char(gy_lat, 3'd2);
+            7'd78: char_byte = q16_char(gy_lat, 3'd3);
+            7'd79: char_byte = q16_char(gy_lat, 3'd4);
+            7'd80: char_byte = q16_char(gy_lat, 3'd5);
+            7'd81: char_byte = q16_char(gy_lat, 3'd6);
+            7'd82: char_byte = " ";
             // ---- 角速度 Z ----
-            7'd78: char_byte = "G";
-            7'd79: char_byte = "Z";
-            7'd80: char_byte = ":";
-            7'd81: char_byte = q16_char(gz_lat, 3'd0);
-            7'd82: char_byte = q16_char(gz_lat, 3'd1);
-            7'd83: char_byte = q16_char(gz_lat, 3'd2);
-            7'd84: char_byte = q16_char(gz_lat, 3'd3);
-            7'd85: char_byte = q16_char(gz_lat, 3'd4);
-            7'd86: char_byte = q16_char(gz_lat, 3'd5);
-            7'd87: char_byte = " ";
+            7'd83: char_byte = "G";
+            7'd84: char_byte = "Z";
+            7'd85: char_byte = ":";
+            7'd86: char_byte = q16_char(gz_lat, 3'd0);
+            7'd87: char_byte = q16_char(gz_lat, 3'd1);
+            7'd88: char_byte = q16_char(gz_lat, 3'd2);
+            7'd89: char_byte = q16_char(gz_lat, 3'd3);
+            7'd90: char_byte = q16_char(gz_lat, 3'd4);
+            7'd91: char_byte = q16_char(gz_lat, 3'd5);
+            7'd92: char_byte = q16_char(gz_lat, 3'd6);
+            7'd93: char_byte = " ";
             // ---- 换行 ----
-            7'd88: char_byte = "\r";     // 8'h0D
-            7'd89: char_byte = "\n";     // 8'h0A
+            7'd94: char_byte = "\r";     // 8'h0D
+            7'd95: char_byte = "\n";     // 8'h0A
             default: char_byte = " ";
         endcase
     end
