@@ -21,13 +21,15 @@
  *         7) 输出旋转矩阵元素（body→earth，供 atan2 换算欧拉角）
  *         四元数可连续跟踪任意 360° 姿态（无欧拉角奇点），
  *         修正项在任意姿态下均有效——即使板子翻转超过 ±90° 也不会折叠
- * @param  KP : 比例校正系数，3753（有符号）。
+ * @param  KP : 比例校正系数，7506（有符号）。
  *         与 MahonyAHRS.c 定标对齐：其 twoKp=1.0 且 halfe=0.5·sinθ，
  *         修正 = 0.5·sinθ rad/s；本模块 e = 65536·sinθ（Q16.16），
- *         Kp·e>>16 = Kp·sinθ raw = Kp/131·sinθ °/s，取 Kp=3753 时
- *         = 28.65°/s·sinθ = 0.5 rad/s·sinθ，与标准默认完全一致。
+ *         Kp·e>>16 = Kp·sinθ raw = Kp/131·sinθ °/s。取 Kp=3753 时
+ *         = 0.5 rad/s·sinθ（标准默认，时间常数 τ=2s）。本工程取 7506
+ *         = 1.0 rad/s·sinθ（τ=1s）以加快收敛——原 τ=2s 下 roll/pitch
+ *         4 秒仅收敛 76%，翻倍后约 2 秒收敛 86%，配合 8 帧低通仍能抑制噪声。
  *         早期版本 Kp=30024（为标准值的 8 倍）曾把加速度计噪声放大注入
- *         三个轴导致上板乱飘，Kp 不宜再调大
+ *         三个轴导致上板乱飘；2 倍是响应速度与噪声抑制的折中，勿超过 4 倍
  * @param  accel_x/y/z[31:0] : 校准后加速度，Q16.16，1g=65536
  * @param  gyro_x/y/z[31:0]  : 校准后角速度原始值（131 LSB/(°/s)）
  * @param  frame_valid : 帧同步脉冲（每帧一次，处理约132个时钟）
@@ -67,9 +69,16 @@
  *            曾用 7 位：LAST_STEP=7'd131 被截断为 3、case 标签 7'd128~131 被
  *            截断为 0~3 造成重复项，状态机死锁 → q_valid 永不产生 → 上板现象为
  *            角度锁死、LED2 心跳常亮。扩展状态机步数时务必同步检查位宽
+ *         10) **积分死区（本模块次深的坑）**：四元数 Q16.15 下 1 LSB = 2^-15，
+ *            而每帧半角增量 0.5·dt·ω ≈ 0.0018°(小修正时) 远小于 1 LSB——
+ *            早期积分 dq=(q·ws)>>32 把小修正直接截断为 0，四元数在误差约
+ *            1.75°(Kp=7506) 处停止逼近，静态角恒差 1~2°。修复：q 改用 64 位
+ *            累加器 qacc（[63:32]=Q16.15、[31:0]=亚 LSB 分数），积分不再 >>32
+ *            截断、dq 低 32 位进 qacc[31:0] 跨帧累积、满 1 LSB 进位——死区消除，
+ *            静态角误差降到 <0.1°（2026-09-28 修复，勿改回 >>32 截断写法）
  */
 module quaternion_ahrs #(
-    parameter signed [31:0] KP = 32'sd3753
+    parameter signed [31:0] KP = 32'sd7506
 )(
     input  wire        clk,
     input  wire        rst_n,
@@ -109,6 +118,15 @@ module quaternion_ahrs #(
     reg signed [31:0] q0, q1, q2, q3;
     reg signed [31:0] r31_r, r32_r, r33_r, r21_r, r11_r;
     reg        q_valid_r;
+    // 64 位累加器：qacc[63:32]=Q16.15 四元数，qacc[31:0]=亚 LSB 分数。
+    // 积分不再 >>32 截断，小修正的亚 LSB 部分进 qacc[31:0] 跨帧累积，
+    // 满 1 LSB 后进位到 qacc[63:32]——消除积分死区（曾致静态角差 ~1.75°）
+    reg signed [63:0] qacc0, qacc1, qacc2, qacc3;
+    // 归一化用的 Q16.15 视图（= 积分累加后的四元数）
+    wire signed [31:0] q0v = qacc0[63:32];
+    wire signed [31:0] q1v = qacc1[63:32];
+    wire signed [31:0] q2v = qacc2[63:32];
+    wire signed [31:0] q3v = qacc3[63:32];
 
     //====================== 迭代状态机 ======================
     localparam S_IDLE = 1'b0;
@@ -129,9 +147,8 @@ module quaternion_ahrs #(
     reg signed [31:0] ex, ey, ez;
     reg signed [31:0] wxc, wyc, wzc;
     reg signed [31:0] wsx, wsy, wsz;
-    reg signed [31:0] u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12;
-    reg signed [31:0] dq0, dq1, dq2, dq3;
-    reg signed [31:0] q0n, q1n, q2n, q3n, q0r, q1r, q2r, q3r;
+    reg signed [63:0] dq0, dq1, dq2, dq3;
+    reg signed [31:0] q0r, q1r, q2r, q3r;
     reg signed [31:0] scale;                       // (3-|q|²)/2，Q31.30
     reg signed [63:0] s0, s1, s2, s3, xs, d;       // |q|²/|a|² 累加（Q32.30/Q32.32）
     // 加速度归一化中间量
@@ -149,6 +166,10 @@ module quaternion_ahrs #(
             q1        <= 32'sd0;
             q2        <= 32'sd0;
             q3        <= 32'sd0;
+            qacc0     <= {ONE, 32'sd0};
+            qacc1     <= 64'sd0;
+            qacc2     <= 64'sd0;
+            qacc3     <= 64'sd0;
             r31_r     <= 32'sd0;
             r32_r     <= 32'sd0;
             r33_r     <= ONE;
@@ -164,10 +185,7 @@ module quaternion_ahrs #(
             ex <= 32'sd0; ey <= 32'sd0; ez <= 32'sd0;
             wxc <= 32'sd0; wyc <= 32'sd0; wzc <= 32'sd0;
             wsx <= 32'sd0; wsy <= 32'sd0; wsz <= 32'sd0;
-            u1 <= 32'sd0; u2 <= 32'sd0; u3 <= 32'sd0; u4 <= 32'sd0; u5 <= 32'sd0; u6 <= 32'sd0;
-            u7 <= 32'sd0; u8 <= 32'sd0; u9 <= 32'sd0; u10 <= 32'sd0; u11 <= 32'sd0; u12 <= 32'sd0;
-            dq0 <= 32'sd0; dq1 <= 32'sd0; dq2 <= 32'sd0; dq3 <= 32'sd0;
-            q0n <= 32'sd0; q1n <= 32'sd0; q2n <= 32'sd0; q3n <= 32'sd0;
+            dq0 <= 64'sd0; dq1 <= 64'sd0; dq2 <= 64'sd0; dq3 <= 64'sd0;
             q0r <= 32'sd0; q1r <= 32'sd0; q2r <= 32'sd0; q3r <= 32'sd0;
             scale <= 32'sd0;
             s0 <= 64'sd0; s1 <= 64'sd0; s2 <= 64'sd0; s3 <= 64'sd0;
@@ -271,59 +289,60 @@ module quaternion_ahrs #(
                         7'd72:  P64 <= s64(wzc)*s64(GYRO_C);
                         7'd73:  wsz <= P64[31:0];
                         //---------- 阶段E：四元数积分 dq = 0.5·dt·q⊗ω（q·ws 走 P64）----------
+                        // 全 64 位积分（不 >>32 截断）：dq 低 32 位进 qacc 累加器消除积分死区
                         7'd74:  P64 <= s64(q1)*s64(wsx);
-                        7'd75:  u1  <= P64>>>32;
+                        7'd75:  s0  <= P64;
                         7'd76:  P64 <= s64(q2)*s64(wsy);
-                        7'd77:  u2  <= P64>>>32;
+                        7'd77:  s1  <= P64;
                         7'd78:  P64 <= s64(q3)*s64(wsz);
-                        7'd79:  u3  <= P64>>>32;
-                        7'd80:  dq0 <= -(u1 + u2 + u3);
+                        7'd79:  s2  <= P64;
+                        7'd80:  dq0 <= -(s0 + s1 + s2);
                         7'd81:  P64 <= s64(q0)*s64(wsx);
-                        7'd82:  u4  <= P64>>>32;
+                        7'd82:  s0  <= P64;
                         7'd83:  P64 <= s64(q3)*s64(wsy);
-                        7'd84:  u5  <= P64>>>32;
+                        7'd84:  s1  <= P64;
                         7'd85:  P64 <= s64(q2)*s64(wsz);
-                        7'd86:  u6  <= P64>>>32;
-                        7'd87:  dq1 <= u4 - u5 + u6;
+                        7'd86:  s2  <= P64;
+                        7'd87:  dq1 <= s0 - s1 + s2;
                         7'd88:  P64 <= s64(q3)*s64(wsx);
-                        7'd89:  u7  <= P64>>>32;
+                        7'd89:  s0  <= P64;
                         7'd90:  P64 <= s64(q0)*s64(wsy);
-                        7'd91:  u8  <= P64>>>32;
+                        7'd91:  s1  <= P64;
                         7'd92:  P64 <= s64(q1)*s64(wsz);
-                        7'd93:  u9  <= P64>>>32;
-                        7'd94:  dq2 <= u7 + u8 - u9;
+                        7'd93:  s2  <= P64;
+                        7'd94:  dq2 <= s0 + s1 - s2;
                         7'd95:  P64 <= s64(q2)*s64(wsx);
-                        7'd96:  u10 <= P64>>>32;
+                        7'd96:  s0  <= P64;
                         7'd97:  P64 <= s64(q1)*s64(wsy);
-                        7'd98:  u11 <= P64>>>32;
+                        7'd98:  s1  <= P64;
                         7'd99:  P64 <= s64(q0)*s64(wsz);
-                        7'd100: u12 <= P64>>>32;
-                        7'd101: dq3 <= -u10 + u11 + u12;
+                        7'd100: s2  <= P64;
+                        7'd101: dq3 <= -s0 + s1 + s2;
                         7'd102: begin
-                            q0n <= q0 + dq0;
-                            q1n <= q1 + dq1;
-                            q2n <= q2 + dq2;
-                            q3n <= q3 + dq3;
+                            qacc0 <= qacc0 + dq0;
+                            qacc1 <= qacc1 + dq1;
+                            qacc2 <= qacc2 + dq2;
+                            qacc3 <= qacc3 + dq3;
                         end
                         //---------- 阶段F：模长修正 q' = q·(3-|q|²)/2（牛顿迭代一阶式）----------
-                        7'd103: P64 <= s64(q0n)*s64(q0n);
+                        7'd103: P64 <= s64(q0v)*s64(q0v);
                         7'd104: s0 <= P64;
-                        7'd105: P64 <= s64(q1n)*s64(q1n);
+                        7'd105: P64 <= s64(q1v)*s64(q1v);
                         7'd106: s1 <= P64;
-                        7'd107: P64 <= s64(q2n)*s64(q2n);
+                        7'd107: P64 <= s64(q2v)*s64(q2v);
                         7'd108: s2 <= P64;
-                        7'd109: P64 <= s64(q3n)*s64(q3n);
+                        7'd109: P64 <= s64(q3v)*s64(q3v);
                         7'd110: s3 <= P64;
                         7'd111: xs <= s0 + s1 + s2 + s3;              // |q|²，Q32.30
                         7'd112: d  <= QSQ - xs;                       // 2^30-|q|²，小量
                         7'd113: scale <= 32'sd1073741824 + (d>>>1);   // (3-|q|²)/2，Q31.30
-                        7'd114: P64 <= s64(q0n)*s64(scale);
+                        7'd114: P64 <= s64(q0v)*s64(scale);
                         7'd115: q0r <= P64>>>30;
-                        7'd116: P64 <= s64(q1n)*s64(scale);
+                        7'd116: P64 <= s64(q1v)*s64(scale);
                         7'd117: q1r <= P64>>>30;
-                        7'd118: P64 <= s64(q2n)*s64(scale);
+                        7'd118: P64 <= s64(q2v)*s64(scale);
                         7'd119: q2r <= P64>>>30;
-                        7'd120: P64 <= s64(q3n)*s64(scale);
+                        7'd120: P64 <= s64(q3v)*s64(scale);
                         7'd121: q3r <= P64>>>30;
                         //---------- 阶段G：旋转矩阵输出（r31/32/33 复用阶段A 结果）----------
                         7'd122: P64 <= s64(q3)*s64(q3);
@@ -342,6 +361,10 @@ module quaternion_ahrs #(
                         //---------- 完成：更新状态并输出有效脉冲 ----------
                         8'd131: begin
                             q0 <= q0r; q1 <= q1r; q2 <= q2r; q3 <= q3r;
+                            qacc0[63:32] <= q0r;
+                            qacc1[63:32] <= q1r;
+                            qacc2[63:32] <= q2r;
+                            qacc3[63:32] <= q3r;
                             q_valid_r <= 1'b1;
                             step  <= 7'd0;
                             state <= S_IDLE;

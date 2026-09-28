@@ -101,6 +101,10 @@ module attitude_calc #(
     // LED4 点亮才表示完成。
     // （曾用"水平度检查"要求 |ax|/|ay|<10°，板子竖直放置时永远不通过、校准
     //   永不完成，导致陀螺零偏不扣、姿态漂移跳变——已改为静止检测）
+    // （2026-09-28 修复 min/max 跟踪滞后：原跟踪采样寄存器 ax_r——比原始输入
+    //   滞后 1 拍且复位值为 0，首帧把 min 钉成 0、spread 变成重力值 16384
+    //   恒大于 JITTER_LIM，第一次校准必失败、要多跑 512 帧才通过；改跟踪
+    //   $signed(accel_x_raw) 原始输入消除滞后，512 帧内一次通过，勿改回 ax_r）
     localparam CALIB_FRAMES = 10'd512;    // 512帧 ≈ 1.024s @500Hz
     // 静止判定门槛：512 帧内 max-min < 2048 raw（≈0.125g，约 ±3.6° 等效角抖动）。
     // DLPF=1（184Hz 带宽）下加速度噪声峰峰约 400~800 raw，早期取 256（0.0156g）
@@ -131,12 +135,12 @@ module attitude_calc #(
             gx_acc <= gx_acc + gx_r;
             gy_acc <= gy_acc + gy_r;
             gz_acc <= gz_acc + gz_r;
-            if (ax_r < ax_min) ax_min <= ax_r;
-            if (ax_r > ax_max) ax_max <= ax_r;
-            if (ay_r < ay_min) ay_min <= ay_r;
-            if (ay_r > ay_max) ay_max <= ay_r;
-            if (az_r < az_min) az_min <= az_r;
-            if (az_r > az_max) az_max <= az_r;
+            if ($signed(accel_x_raw) < ax_min) ax_min <= $signed(accel_x_raw);
+            if ($signed(accel_x_raw) > ax_max) ax_max <= $signed(accel_x_raw);
+            if ($signed(accel_y_raw) < ay_min) ay_min <= $signed(accel_y_raw);
+            if ($signed(accel_y_raw) > ay_max) ay_max <= $signed(accel_y_raw);
+            if ($signed(accel_z_raw) < az_min) az_min <= $signed(accel_z_raw);
+            if ($signed(accel_z_raw) > az_max) az_max <= $signed(accel_z_raw);
             if (calib_cnt == CALIB_FRAMES - 1) begin
                 if ((ax_spread < JITTER_LIM) &&
                     (ay_spread < JITTER_LIM) &&

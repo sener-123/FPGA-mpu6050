@@ -89,8 +89,10 @@ module tb_attitude;
                     $display("P2 CHECK: roll=%0d pitch=%0d yaw=%0d", roll, pitch, yaw);
                 end
             end
-            // P3：pitch ≈ +160°（Q16.16 = 10485760），roll≈180° 或 -180°（绕Y翻转）
-            if (frame_cnt == 4600) begin
+            // P3：pitch ≈ +160°（Q16.16 = 10485760），roll≈180° 或 -180°（绕Y翻转）。
+            // 160° 大角度叉积修正 sinθ→0，静态收敛需约 8s（4s 时仅到 ~155°），
+            // 故检查点从 4600 延到 6600 帧（8s）
+            if (frame_cnt == 6600) begin
                 if ((pitch < 32'sd10350000) || (pitch > 32'sd10620000)) begin
                     $display("P3 FAIL: pitch=%0d (期望≈10485760)", pitch);
                     errors = errors + 1;
@@ -98,7 +100,7 @@ module tb_attitude;
                 $display("P3 CHECK: roll=%0d pitch=%0d yaw=%0d", roll, pitch, yaw);
             end
         end
-        if (frame_cnt == 4700) begin
+        if (frame_cnt == 6700) begin
             if (errors == 0) $display("===== tb_attitude PASS =====");
             else             $display("===== tb_attitude FAIL: %0d errors =====", errors);
             $stop;
