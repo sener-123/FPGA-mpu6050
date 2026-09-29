@@ -1,0 +1,283 @@
+m255
+K4
+z2
+!s11f vlog 2020.4 2020.10, Oct 13 2020
+13
+!s112 1.1
+!i10d 8192
+!i10e 25
+!i10f 100
+cModel Technology
+Z0 dC:/Users/30893/Desktop/FPGA_imu/sim/_verify
+T_opt
+!s110 1790686686
+VBaaLS]6@[UGZDA4oJ5BMj0
+04 11 4 work tb_madgwick fast 0
+=1-c4c6e661e905-6abbb5dd-22b-13ce0
+Z1 o-quiet -auto_acc_if_foreign -work work_m
+Z2 tCvgOpt 0
+n@_opt
+Z3 OL;O;2020.4;71
+T_opt1
+!s110 1790679825
+VOZ00NGXXfLEgh7zGLemDS0
+04 12 4 work tb_firewater fast 0
+=1-c4c6e661e905-6abb9b10-251-e7d4
+R1
+R2
+n@_opt1
+R3
+R0
+vcordic
+Z4 !s110 1790686437
+!i10b 1
+!s100 eYf9Ae3nTBcgV;CdO:78=2
+Z5 !s11b Dg1SIo80bB@j0V0VzS_@n1
+IGZa_<FG[5iW60DI4Ph8_f2
+R0
+w1790607631
+8../../rtl/cordic.v
+F../../rtl/cordic.v
+!i122 8
+L0 26 133
+Z6 VDg1SIo80bB@j0V0VzS_@n1
+Z7 OL;L;2020.4;71
+r1
+!s85 0
+31
+Z8 !s108 1790686437.000000
+Z9 !s107 tb_madgwick.v|../../rtl/displacement_calc.v|../../rtl/madgwick_ahrs.v|../../rtl/inv_sqrt.v|../../rtl/cordic.v|../../rtl/mul32x32.v|
+Z10 !s90 -work|work_m|../../rtl/mul32x32.v|../../rtl/cordic.v|../../rtl/inv_sqrt.v|../../rtl/madgwick_ahrs.v|../../rtl/displacement_calc.v|tb_madgwick.v|
+!i113 0
+Z11 o-work work_m -L mtiAvm -L mtiRnm -L mtiOvm -L mtiUvm -L mtiUPF -L infact
+R2
+vdisplacement_calc
+R4
+!i10b 1
+!s100 bMA<lIb`QbWZ<<=C9n56z0
+R5
+IKQZZZKB26zzmUc4AA>`5<3
+R0
+w1790679141
+8../../rtl/displacement_calc.v
+F../../rtl/displacement_calc.v
+!i122 8
+L0 21 69
+R6
+R7
+r1
+!s85 0
+31
+R8
+R9
+R10
+!i113 0
+R11
+R2
+vi2c_master
+Z12 !s110 1790679831
+!i10b 1
+!s100 adK_zW:FJ[>38X^:dQjU52
+R5
+ISXNa`ROcjM_a[g[C=OgO>0
+R0
+w1790256477
+8../../rtl/i2c_master.v
+F../../rtl/i2c_master.v
+!i122 6
+L0 34 312
+R6
+R7
+r1
+!s85 0
+31
+Z13 !s108 1790679831.000000
+Z14 !s107 ../../rtl/mpu6050_top.v|../../rtl/uart_tx.v|../../rtl/displacement_calc.v|../../rtl/madgwick_ahrs.v|../../rtl/inv_sqrt.v|../../rtl/cordic.v|../../rtl/mpu6050_driver.v|../../rtl/i2c_master.v|
+Z15 !s90 -work|work_m|../../rtl/i2c_master.v|../../rtl/mpu6050_driver.v|../../rtl/cordic.v|../../rtl/inv_sqrt.v|../../rtl/madgwick_ahrs.v|../../rtl/displacement_calc.v|../../rtl/uart_tx.v|../../rtl/mpu6050_top.v|
+!i113 0
+R11
+R2
+vinv_sqrt
+Z16 !s110 1790686681
+!i10b 1
+!s100 FaR41baL;j2KID1U`6PYE0
+R5
+IOU7jMWZnTnX8BBDMf0Z0a1
+R0
+w1790686670
+8../../rtl/inv_sqrt.v
+F../../rtl/inv_sqrt.v
+!i122 9
+L0 15 123
+R6
+R7
+r1
+!s85 0
+31
+Z17 !s108 1790686680.000000
+Z18 !s107 tb_madgwick.v|../../rtl/madgwick_ahrs.v|../../rtl/inv_sqrt.v|
+Z19 !s90 -work|work_m|../../rtl/inv_sqrt.v|../../rtl/madgwick_ahrs.v|tb_madgwick.v|
+!i113 0
+R11
+R2
+vmadgwick_ahrs
+R16
+!i10b 1
+!s100 zV5JG??]5nPO;J2A<70g:3
+R5
+IP:cK33YL<GmVQ]m8J:@]80
+R0
+w1790686431
+8../../rtl/madgwick_ahrs.v
+F../../rtl/madgwick_ahrs.v
+!i122 9
+L0 22 372
+R6
+R7
+r1
+!s85 0
+31
+R17
+R18
+R19
+!i113 0
+R11
+R2
+vmpu6050_driver
+R12
+!i10b 1
+!s100 a`MWc5Wno;[mNnaZ_]ML<1
+R5
+ISChOYKoM_UnQ?7dM8]O5F2
+R0
+w1790256819
+8../../rtl/mpu6050_driver.v
+F../../rtl/mpu6050_driver.v
+!i122 6
+L0 37 349
+R6
+R7
+r1
+!s85 0
+31
+R13
+R14
+R15
+!i113 0
+R11
+R2
+vmpu6050_top
+R12
+!i10b 1
+!s100 5VWA<DoPM1D0Rlh@>A4]20
+R5
+IX8Jz[o8V]a<NGoXmY8_Fo3
+R0
+w1790679776
+8../../rtl/mpu6050_top.v
+F../../rtl/mpu6050_top.v
+!i122 6
+L0 25 243
+R6
+R7
+r1
+!s85 0
+31
+R13
+R14
+R15
+!i113 0
+R11
+R2
+vmul32x32
+R4
+!i10b 1
+!s100 [9KU[NeV2zYGoWEWo]WC;2
+R5
+IfARQ3n9WK0?=e7em47e2B3
+R0
+w1790685945
+8../../rtl/mul32x32.v
+F../../rtl/mul32x32.v
+!i122 8
+L0 13 7
+R6
+R7
+r1
+!s85 0
+31
+R8
+R9
+R10
+!i113 0
+R11
+R2
+vtb_firewater
+!s110 1790679821
+!i10b 1
+!s100 F?OU:fgieXQTXEfncKOF_2
+R5
+I@kZI=mUUkDgmVO991X<jD1
+R0
+w1790679817
+8tb_firewater.v
+Ftb_firewater.v
+!i122 5
+L0 3 101
+R6
+R7
+r1
+!s85 0
+31
+!s108 1790679821.000000
+!s107 tb_firewater.v|
+!s90 -work|work_m|tb_firewater.v|
+!i113 0
+R11
+R2
+vtb_madgwick
+R16
+!i10b 1
+!s100 nHCohJM5iobPe_19A4n;22
+R5
+IWeRV`9e[hEDhn;C6MPaZY3
+R0
+w1790679391
+8tb_madgwick.v
+Ftb_madgwick.v
+!i122 9
+L0 4 75
+R6
+R7
+r1
+!s85 0
+31
+R17
+R18
+R19
+!i113 0
+R11
+R2
+vuart_tx
+R12
+!i10b 1
+!s100 LDzKghHBBGa=m2V;2EnjV1
+R5
+IFNZ3bK?KnZCI^QZF;1iaV1
+R0
+w1790403388
+8../../rtl/uart_tx.v
+F../../rtl/uart_tx.v
+!i122 6
+L0 24 64
+R6
+R7
+r1
+!s85 0
+31
+R13
+R14
+R15
+!i113 0
+R11
+R2

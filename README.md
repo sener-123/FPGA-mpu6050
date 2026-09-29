@@ -1,7 +1,8 @@
-# FPGA_imu — FPGA 读取 MPU6050 并解算姿态（PGL22G 开发板）
+# FPGA_imu — FPGA 读取 MPU6050 并解算姿态 + 位移（PGL22G 开发板）
 
-用 FPGA（Verilog）通过 I2C 读取 MPU6050 的三轴加速度与角速度，实时解算出欧拉角
-（roll / pitch / yaw），并通过板载 USB 转串口打印。
+用 FPGA（Verilog）通过 I2C 读取 MPU6050 的三轴加速度与角速度，用 **Madgwick 四元数
+梯度下降**解算出欧拉角（roll / pitch / yaw，全范围无万向锁），并估计世界系位移
+（x / y / z），通过板载 USB 转串口以 **VOFA+ FireWater 协议**输出。
 
 ```
 FPGA_imu/
@@ -9,9 +10,14 @@ FPGA_imu/
 │   ├── i2c_master.v       通用 I2C 主机控制器（可复用，与芯片无关）
 │   ├── mpu6050_driver.v   MPU6050 初始化 + 500Hz 周期采集（例化 i2c_master）
 │   ├── cordic.v           16级流水线 CORDIC 向量模式（atan2 + 开方）
-│   ├── attitude_calc.v    姿态解算算法（例化 2 个 cordic，Q16.16 定点）
+│   ├── inv_sqrt.v         定点倒数平方根 1/√x（LUT + 牛顿，时分复用单乘法器）
+│   ├── madgwick_ahrs.v    Madgwick 姿态解算 + 世界系线性加速度（时分复用单乘法器，例化 3 cordic + 1 inv_sqrt）
+│   ├── displacement_calc.v 世界系加速度双重积分 -> 位移（含零速修正）
 │   ├── uart_tx.v          UART 发送器（115200 8N1）
-│   └── mpu6050_top.v      顶层：例化全部模块 + ASCII 文本帧格式化
+│   ├── mpu6050_top.v      顶层：例化全部模块 + Firewater 帧格式化
+│   └── attitude_calc.v    （旧）互补滤波方案，已弃用（保留参考）
+├── docs/
+│   └── 姿态算法说明.md    姿态算法 + 位移 + Firewater 协议详解
 ├── pds/
 │   ├── pgl22g.adc         物理约束：引脚位置/电平标准（PDS）
 │   └── pgl22g.fdc         时序约束：50MHz 时钟（PDS）
@@ -23,7 +29,8 @@ FPGA_imu/
 ```
 mpu6050_top
  ├── mpu6050_driver ── i2c_master
- ├── attitude_calc ── cordic ×2
+ ├── madgwick_ahrs ── inv_sqrt ×1、cordic ×3（内部单乘法器时分复用）
+ ├── displacement_calc
  └── uart_tx
 ```
 
@@ -31,8 +38,9 @@ mpu6050_top
 
 - 上电自动初始化：延时 100ms → WHO_AM_I(0x75) 校验 → 唤醒(0x6B=0x00) → 稳定 50ms → 配置寄存器
 - 每 2ms 突发读 14 字节（0x3B~0x48），输出原始数据 + 帧同步脉冲（500Hz）
-- 解算三轴加速度（g）、角速度（°/s）、欧拉角 roll/pitch/yaw（°），全部 Q16.16 定点
-- 串口每 100ms 打印一帧 ASCII 文本
+- Madgwick 四元数梯度下降解算欧拉角 roll/pitch/yaw（°，全范围无万向锁），全部 Q16.16 定点
+- 世界系线性加速度双重积分，估计位移 x/y/z（m，演示级，含零速修正）
+- 串口以 VOFA+ FireWater 协议 100Hz 输出 6 通道（roll,pitch,yaw,x,y,z）
 - 4 个 LED 指示系统状态（错误/心跳/初始化完成/首帧成功）
 
 ## 2. 量程与配置
@@ -46,13 +54,17 @@ mpu6050_top
 
 ## 3. 姿态算法
 
-- 加速度计静态角（CORDIC 实现 atan2 与开方）：
-  - `roll  = atan2(ay, az)`
-  - `pitch = atan2(-ax, sqrt(ay²+az²))`
-- 互补滤波（抑制陀螺仪温漂，滤除加速度计振动/运动干扰）：
-  - `angle = 0.98×(angle + gyro×dt) + 0.02×accel_angle`，dt = 2ms
-- `yaw` = 陀螺仪 z 轴纯积分
-  > ⚠️ MPU6050 没有磁力计，yaw 无绝对参考，会随时间缓慢漂移，上电时从 0 开始。
+采用 **Madgwick AHRS**（四元数梯度下降，6 轴 IMU），详见 [`docs/姿态算法说明.md`](docs/姿态算法说明.md)：
+
+- 四元数 `q=[q0,q1,q2,q3]` 表示姿态，陀螺仪积分 + 加速度计梯度下降修正漂移：
+  - `q̇ = ½·q⊗ω − β·∇f/|∇f|`，`β = 0.1 rad/s`
+- 欧拉角（全范围无万向锁）：
+  - `roll  = atan2( 2(q0q1+q2q3), 1−2(q1²+q2²) )`
+  - `pitch = asin( 2(q0q2−q1q3) )`
+  - `yaw   = atan2( 2(q0q3+q1q2), 1−2(q2²+q3²) )`
+- 位移：世界系线性加速度双重积分（去重力 + 零速修正 ZUPT）
+  > ⚠️ MPU6050 没有磁力计，yaw 无绝对参考，仅积分陀螺仪，会随时间缓慢漂移；
+  > 位移为演示级精度，无外部参考会漂移。
 
 ## 4. PDS 工程搭建（PGL22G 开发板）
 
@@ -106,27 +118,36 @@ mpu6050_top
 
 上电正常时序：LED1 灭 → 约 0.2s 后 LED3 亮 → LED4 亮 → LED2 开始闪烁。
 
-## 7. 串口输出格式
+## 7. 串口输出格式（VOFA+ FireWater）
 
-板载 CP2102 的 USB 口直连电脑（需装 CP210x 驱动），串口助手设置：
-波特率 115200、数据位 8、无校验、停止位 1。每 100ms 一帧，共 90 字节：
+板载 CP2102 的 USB 口直连电脑（需装 CP210x 驱动）。数据按 **VOFA+ FireWater 协议**
+输出（逗号分隔 + 换行），100Hz，每帧 54 字节：
 
 ```
-R: -12.3 P: -45.6 Y: 180.0 | AX: -0.01 AY:  0.02 AZ:  1.00 | GX:   0.1 GY:  -0.2 GZ:   0.3
++029.998,+000.000,+000.000,+000.125,-000.500,+000.000
 ```
 
-- `R/P/Y`：roll / pitch / yaw，单位度，1 位小数
-- `AX/AY/AZ`：加速度，单位 g，2 位小数（水平静止时 AZ ≈ +1.00）
-- `GX/GY/GZ`：角速度，单位 °/s，1 位小数（静止时 ≈ 0）
+| 通道 | 含义 | 单位 |
+|---|---|---|
+| 1 | roll | 度 |
+| 2 | pitch | 度 |
+| 3 | yaw | 度 |
+| 4 | 位移 x | 米 |
+| 5 | 位移 y | 米 |
+| 6 | 位移 z | 米 |
+
+每通道 8 字符（符号 + 3 位整数 + 小数点 + 3 位小数）。上位机用 **VOFA+**
+（<https://www.vofa.plus>），协议引擎选 **FireWater**，波特率 115200。
 
 ## 8. 上板验证步骤
 
 1. 按第 4 节建好 PDS 工程，按第 5 节接好 MPU6050，下载位流
-2. 打开串口助手（115200），按一下复位键：
-   - 静止平放：`R/P ≈ 0`，`AZ ≈ +1.00`
-   - 绕 X 轴翻转：roll 跟随变化（范围 ±180°）
-   - 绕 Y 轴翻转：pitch 跟随变化（范围 ±90°，超过为倒置）
+2. 打开 VOFA+（协议引擎 FireWater，115200），按一下复位键：
+   - 静止平放：roll/pitch/yaw ≈ 0，位移 x/y/z 保持 ≈ 0
+   - 绕 X 轴翻转：roll 跟随变化（±180°，无万向锁）
+   - 绕 Y 轴翻转：pitch 跟随变化（±90°）
    - 绕 Z 轴旋转：yaw 变化（静止后缓慢漂移属正常）
+   - 沿某轴快速平移：对应位移通道短暂变化（松手后回落，演示级精度）
 3. 若串口无输出，对照第 6 节看 LED：
    - LED1 亮（错误）：检查 SDA/SCL 是否接反、模块供电是否 3.3V
    - LED3 灭：初始化未完成，检查 I2C 接线
@@ -134,7 +155,7 @@ R: -12.3 P: -45.6 Y: 180.0 | AX: -0.01 AY:  0.02 AZ:  1.00 | GX:   0.1 GY:  -0.2
 
 ### 8.1 串口乱码排查
 
-若串口助手收到乱码、且每行长度不一（正常时每帧固定 90 字节），先用板载 4 个 LED
+若串口助手收到乱码、且每行长度不一（正常时每帧固定 54 字节），先用板载 4 个 LED
 判断 FPGA 内部是否在正常工作，再检查信号链路：
 
 **第一步：看 LED，判断 FPGA 内部状态（最省事的分水岭）**
@@ -157,51 +178,43 @@ R: -12.3 P: -45.6 Y: 180.0 | AX: -0.01 AY:  0.02 AZ:  1.00 | GX:   0.1 GY:  -0.2
 4. 换杜邦线、重新插紧（接触不良极常见）
 5. 模块供电：3.3V 模块不要接 J8 的 +5V；5V 模块供电正常但注意别把 TXD 接回 FPGA
 6. 若以上都正常，用示波器/逻辑分析仪量 T11：应能看到 3.3V 方波，
-   位宽约 86.8µs（115200bps），每 100ms 一帧突发
+   位宽约 86.8µs（115200bps），每 10ms 一帧突发（100Hz）
 
 **板载 CP2102 串口（不接外接模块时）**：`uart_tx` 必须约束到 C10（板载 CP2102 的
 RXD 输入脚，手册 3-6-2 表）。约束到其他引脚时 C10 悬空 → CP2102 把噪声当数据发给
 电脑，表现同样为乱码。另外确认插的是 USB-UART 口（CP2102）而非 USB2.0 口（FT232H），
-VOFA+ 协议引擎选"普通协议"（不要选 JustFloat 等私有协议），编码 UTF-8/GBK 均可。
+VOFA+ 数据引擎选"FireWater"（不要选 JustFloat 等私有协议），编码 UTF-8/GBK 均可。
 
 ## 9. 二次开发接口
 
-### 9.1 DEBUG_PORTS 宏（宽调试端口）
+### 9.1 调试观察
 
-默认顶层只占用 **9 个 IO**。需要把解算结果引到引脚上观察时（例如接逻辑分析仪），
-在 PDS 工程设置中定义宏 `DEBUG_PORTS`（或命令行 `+define+DEBUG_PORTS`），
-顶层将额外引出 12 个端口：
-
-| 端口 | 位宽 | 含义 |
-|---|---|---|
-| `accel_x_g / accel_y_g / accel_z_g` | [31:0] | 加速度，Q16.16，单位 g |
-| `gyro_x_dps / gyro_y_dps / gyro_z_dps` | [31:0] | 角速度，Q16.16，单位 °/s |
-| `roll_deg / pitch_deg / yaw_deg` | [31:0] | 姿态角，Q16.16，单位 ° |
-| `data_valid` | 1 | 数据有效脉冲（约 500Hz） |
-| `error[1:0]` | 2 | 00=正常 01=WHO_AM_I失败 10=I2C NACK |
-| `state_dbg[7:0]` | 8 | 驱动状态机状态 |
-
-> ⚠️ 打开宏后端口总数约 304 个，**超出 PGL22G-6CMBG324 的 240 IO 上限**，
-> 布局布线会报错（这就是之前 "IO is not enough" 错误的原因）。
-> 这些端口只适合引出个别几个信号，且必须在 .adc 中自行添加引脚约束。
-> 更推荐用 PDS 的在线逻辑分析仪（DebugCore）观察内部信号，无需占用 IO。
-
-Q16.16 换算：实际值 = 端口值(有符号) ÷ 65536。
+本版顶层精简为 **9 个 IO**（`clk/rst_n/i2c_scl/i2c_sda/uart_tx/led[3:0]`），
+未再引出宽调试端口。需观察内部信号（四元数、世界加速度、位移、状态机等）时，
+推荐用 **PDS 在线逻辑分析仪（DebugCore）**，无需占用 IO。
+`madgwick_ahrs.v` 额外保留了 `q0_dbg~q3_dbg` 四元数调试输出（顶层未接），
+可在仿真或 DebugCore 中观测。Q16.16 换算：实际值 = 值(有符号) ÷ 65536。
 
 ### 9.2 模块级复用
 
 - `i2c_master.v`：通用 I2C 主机，与 MPU6050 无关，可直接复用到任何 I2C 芯片
 - `uart_tx.v`：通用串口发送器，`tx_start` 脉冲触发、`tx_busy` 握手
-- `attitude_calc.v` / `cordic.v`：纯组合/流水线运算，可独立替换成四元数算法
+- `cordic.v`：纯流水线 atan2/开方（度输出），可复用
+- `inv_sqrt.v`：定点倒数平方根，可复用
+- `madgwick_ahrs.v` / `displacement_calc.v`：姿态/位移解算核心（独立模块，可替换）
 
 ## 10. 已知限制
 
-- pitch 范围 (-90°, 90°)：由 atan2 公式决定，板子翻转超过 ±90°（倒置）时请改用四元数方案
-- yaw 漂移：无磁力计，仅积分角速度
-- 姿态解算在加速度计有持续线性加速度时精度下降（互补滤波按静止场景调参）
+- yaw 漂移：无磁力计，仅积分陀螺仪 z 轴，长时间会漂移
+- 位移漂移：双重积分无绝对参考，ZUPT 对水平匀速运动不敏感，位移仅演示级精度
+- 加速度计持续大加速度时姿态收敛变慢（梯度下降以重力为参考）
 
 ## 11. 参考
 
+- Madgwick, S. O. H. "An efficient orientation filter for inertial and inertial/magnetic sensor arrays", 2011
+- x-io Technologies `MadgwickAHRS.c`（开源 C 参考实现）
+- VOFA+ FireWater 协议：<https://www.vofa.plus/docs/learning/dataengines/firewater/>
 - MPU-6000/MPU-6050 Product Specification，Rev 3.4（本目录 PDF）
-- MPU-6000/MPU-6050 Register Map and Descriptions，RM-MPU-6000A-00，Rev 4.2（寄存器映射）
+- MPU-6000/MPU-6050 Register Map and Descriptions，RM-MPU-6000A-00，Rev 4.2
 - PGL22G 开发板用户手册 Rev1.1（ALINX，板卡引脚定义）
+- 姿态/位移/定点算法详解：`docs/姿态算法说明.md`
